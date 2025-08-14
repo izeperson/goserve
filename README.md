@@ -1,4 +1,5 @@
 <h1 align="center">GoServe</h1>
+<p align="center">GoServe, the web server written in Go.</p>
 <div align="center">
   <img width="256" height="256" alt="transparent" src="https://github.com/user-attachments/assets/02ce36ca-74c6-4d22-9ec9-e66750efbd24" />
 </div>
