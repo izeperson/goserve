@@ -1,6 +1,6 @@
 <h1 align="center">GoServe</h1>
 <div align="center">
-  <img href="">
+  <img width="256" height="256" alt="transparent" src="https://github.com/user-attachments/assets/02ce36ca-74c6-4d22-9ec9-e66750efbd24" />
 </div>
 <br>
 <div align="center">
