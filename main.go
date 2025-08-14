@@ -3,8 +3,7 @@ package main
 import (
 	"bufio"
 	"compress/gzip"
-	"crypto/tls"
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -358,60 +357,33 @@ func proxyTo(w http.ResponseWriter, r *http.Request, target string, rt Route) {
 	p.ServeHTTP(w, r)
 }
 
-func parseConfig(p string) (*Config, error) {
-	if p == "" {
-		return defaultConfig(), nil
-	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return nil, err
-	}
-	var cfg Config
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
-}
+// func serve(cfg *Config) ([]*http.Server, error) {
+// 	var servers []*http.Server
+// 	baseHandler := buildHandler(cfg)
+// 	for _, lst := range cfg.Listeners {
+// 		h := baseHandler
+// 		ah := &atomicHandler{}
+// 		ah.Store(h)
+// 		srv := &http.Server{Handler: ah}
+// 		ln, err := net.Listen("tcp", lst.Addr)
+// 		if err != nil {
+// 			return nil, err
+// 		}
+// 		if lst.TLSCert != "" && lst.TLSKey != "" {
+// 			cert, err := tls.LoadX509KeyPair(lst.TLSCert, lst.TLSKey)
+// 			if err != nil {
+// 				return nil, err
+// 			}
+// 			tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}
+// 			ln = tls.NewListener(ln, tlsCfg)
+// 		}
+// 		servers = append(servers, srv)
+// 		go func(s *http.Server, l net.Listener) { _ = s.Serve(l) }(srv, ln)
+// 	}
+// 	return servers, nil
+// }
 
-func defaultConfig() *Config {
-	return &Config{
-		Listeners: []Listener{{Addr: ":8080"}},
-		Servers: []Server{{
-			Hosts:  []string{},
-			Routes: []Route{{PathPrefix: "/", StaticDir: ".", IndexFile: "index.html"}},
-		}},
-		Gzip:      true,
-		AccessLog: "combined",
-	}
-}
-
-func serve(cfg *Config) ([]*http.Server, error) {
-	var servers []*http.Server
-	baseHandler := buildHandler(cfg)
-	for _, lst := range cfg.Listeners {
-		h := baseHandler
-		ah := &atomicHandler{}
-		ah.Store(h)
-		srv := &http.Server{Handler: ah}
-		ln, err := net.Listen("tcp", lst.Addr)
-		if err != nil {
-			return nil, err
-		}
-		if lst.TLSCert != "" && lst.TLSKey != "" {
-			cert, err := tls.LoadX509KeyPair(lst.TLSCert, lst.TLSKey)
-			if err != nil {
-				return nil, err
-			}
-			tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}
-			ln = tls.NewListener(ln, tlsCfg)
-		}
-		servers = append(servers, srv)
-		go func(s *http.Server, l net.Listener) { _ = s.Serve(l) }(srv, ln)
-	}
-	return servers, nil
-}
-
-func reload(ah []*atomicHandler, path string) error { return nil }
+// func reload(ah []*atomicHandler, path string) error { return nil }
 
 type ipCounter struct {
 	mu    sync.Mutex
@@ -454,20 +426,32 @@ func main() {
 		log.Fatalf("Directory %s does not exist", *dir)
 	}
 
-	fsHandler := http.FileServer(http.Dir(*dir))
-	var handler http.Handler = fsHandler
+	var (
+		handlerValue atomic.Value
+		counter      *ipCounter
+	)
 
-	if *logRequests {
-		counter := newIPCounter()
-		handler = logRequestHandler(fsHandler, counter)
+	buildHandler := func() http.Handler {
+		fsHandler := http.FileServer(http.Dir(*dir))
+		if *logRequests {
+			if counter == nil {
+				counter = newIPCounter()
+			}
+			return logRequestHandler(fsHandler, counter)
+		}
+		return fsHandler
 	}
+
+	handlerValue.Store(buildHandler())
 
 	srv := &http.Server{
-		Addr:    *addr,
-		Handler: handler,
+		Addr: *addr,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handlerValue.Load().(http.Handler).ServeHTTP(w, r)
+		}),
 	}
 
-	if *tlsCert != "" && *tlsKey != "" {
+	if *tlsCert != "" && *tlsKey != "" { // future feature (soon as it's already in the -help section)
 		fmt.Printf("Serving %s on %s (TLS)\n", *dir, *addr)
 		go func() {
 			if err := srv.ListenAndServeTLS(*tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
@@ -482,7 +466,7 @@ func main() {
 			}
 		}()
 	}
-	// Graceful shutdown logic
+
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
@@ -494,29 +478,25 @@ func main() {
 				break
 			}
 			cmd := scanner.Text()
-			if cmd == "exit" || cmd == "stop" {
+			switch cmd {
+			case "exit", "stop":
 				fmt.Println("Shutting down...")
-				_ = srv.Close()
+				_ = srv.Shutdown(context.TODO())
 				os.Exit(0)
-			}
-			if cmd == "reload" {
+			case "reload":
 				fmt.Println("Reloading Server!")
 				if _, err := os.Stat(*dir); os.IsNotExist(err) {
 					fmt.Printf("Directory %s does not exist\n", *dir)
 					continue
 				}
-				newHandler := http.FileServer(http.Dir(*dir))
-				if *logRequests {
-					counter := newIPCounter()
-					newHandler = logRequestHandler(newHandler, counter)
-				}
-				srv.Handler = newHandler
+				handlerValue.Store(buildHandler())
 			}
 		}
 	}()
 
 	<-stop
 	fmt.Println("Received interrupt, shutting down...")
-	_ = srv.Close()
+	_ = srv.Shutdown(context.TODO())
+	os.Exit(0)
 	fmt.Println("Server stopped.")
 }
