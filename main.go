@@ -357,34 +357,6 @@ func proxyTo(w http.ResponseWriter, r *http.Request, target string, rt Route) {
 	p.ServeHTTP(w, r)
 }
 
-// func serve(cfg *Config) ([]*http.Server, error) {
-// 	var servers []*http.Server
-// 	baseHandler := buildHandler(cfg)
-// 	for _, lst := range cfg.Listeners {
-// 		h := baseHandler
-// 		ah := &atomicHandler{}
-// 		ah.Store(h)
-// 		srv := &http.Server{Handler: ah}
-// 		ln, err := net.Listen("tcp", lst.Addr)
-// 		if err != nil {
-// 			return nil, err
-// 		}
-// 		if lst.TLSCert != "" && lst.TLSKey != "" {
-// 			cert, err := tls.LoadX509KeyPair(lst.TLSCert, lst.TLSKey)
-// 			if err != nil {
-// 				return nil, err
-// 			}
-// 			tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1"}}
-// 			ln = tls.NewListener(ln, tlsCfg)
-// 		}
-// 		servers = append(servers, srv)
-// 		go func(s *http.Server, l net.Listener) { _ = s.Serve(l) }(srv, ln)
-// 	}
-// 	return servers, nil
-// }
-
-// func reload(ah []*atomicHandler, path string) error { return nil }
-
 type ipCounter struct {
 	mu    sync.Mutex
 	count map[string]int
@@ -472,6 +444,7 @@ func main() {
 
 	go func() {
 		scanner := bufio.NewScanner(os.Stdin)
+		options := []string{"exit", "stop", "reload"}
 		for {
 			fmt.Print(">>> ")
 			if !scanner.Scan() {
@@ -490,6 +463,13 @@ func main() {
 					continue
 				}
 				handlerValue.Store(buildHandler())
+			default:
+				suggestion := closestOption(cmd, options)
+				if suggestion != "" {
+					fmt.Printf("Invalid Option. Did you mean: %s?\n", suggestion)
+				} else {
+					fmt.Println("Invalid Option.")
+				}
 			}
 		}
 	}()
@@ -499,4 +479,60 @@ func main() {
 	_ = srv.Shutdown(context.TODO())
 	os.Exit(0)
 	fmt.Println("Server stopped.")
+}
+
+func closestOption(input string, options []string) string {
+	minDist := 3
+	closest := ""
+	for _, opt := range options {
+		if d := levenshtein(input, opt); d < minDist {
+			minDist = d
+			closest = opt
+		}
+	}
+	return closest
+}
+
+func levenshtein(a, b string) int {
+	la, lb := len(a), len(b)
+	if la == 0 {
+		return lb
+	}
+	if lb == 0 {
+		return la
+	}
+	dp := make([][]int, la+1)
+	for i := range dp {
+		dp[i] = make([]int, lb+1)
+	}
+	for i := 0; i <= la; i++ {
+		dp[i][0] = i
+	}
+	for j := 0; j <= lb; j++ {
+		dp[0][j] = j
+	}
+	for i := 1; i <= la; i++ {
+		for j := 1; j <= lb; j++ {
+			cost := 0
+			if a[i-1] != b[j-1] {
+				cost = 1
+			}
+			dp[i][j] = min(
+				dp[i-1][j]+1,
+				dp[i][j-1]+1,
+				dp[i-1][j-1]+cost,
+			)
+		}
+	}
+	return dp[la][lb]
+}
+
+func min(a, b, c int) int {
+	if a < b && a < c {
+		return a
+	}
+	if b < c {
+		return b
+	}
+	return c
 }
