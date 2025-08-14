@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"compress/gzip"
 	"crypto/tls"
 	"encoding/json"
@@ -13,10 +14,12 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -355,11 +358,6 @@ func proxyTo(w http.ResponseWriter, r *http.Request, target string, rt Route) {
 	p.ServeHTTP(w, r)
 }
 
-type urlFix struct{ raw string }
-
-func (u *urlFix) String() string                       { return u.raw }
-func (u *urlFix) ResolveReference(ref *urlFix) *urlFix { return u }
-
 func parseConfig(p string) (*Config, error) {
 	if p == "" {
 		return defaultConfig(), nil
@@ -415,9 +413,39 @@ func serve(cfg *Config) ([]*http.Server, error) {
 
 func reload(ah []*atomicHandler, path string) error { return nil }
 
+type ipCounter struct {
+	mu    sync.Mutex
+	count map[string]int
+}
+
+func newIPCounter() *ipCounter {
+	return &ipCounter{count: make(map[string]int)}
+}
+
+func (c *ipCounter) increment(ip string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.count[ip]++
+	return c.count[ip]
+}
+
+func logRequestHandler(next http.Handler, counter *ipCounter) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		if r.Method == "GET" {
+			duration := time.Since(start)
+			ip := r.RemoteAddr
+			cnt := counter.increment(ip)
+			fmt.Printf("\033[32m[GET]\033[0m %s: %dms, %d\n", ip, duration.Milliseconds(), cnt)
+		}
+	})
+}
+
 func main() {
 	dir := flag.String("dir", "./html", "Directory to serve HTML from")
 	addr := flag.String("addr", ":8080", "Address to listen on")
+	logRequests := flag.Bool("log", false, "Log GET requests with duration")
 	tlsCert := flag.String("tls-cert", "", "Path to TLS certificate")
 	tlsKey := flag.String("tls-key", "", "Path to TLS key")
 	flag.Parse()
@@ -426,32 +454,69 @@ func main() {
 		log.Fatalf("Directory %s does not exist", *dir)
 	}
 
-	http.Handle("/", http.FileServer(http.Dir(*dir)))
+	fsHandler := http.FileServer(http.Dir(*dir))
+	var handler http.Handler = fsHandler
 
-	fmt.Printf("Serving %s on %s\n", *dir, *addr)
+	if *logRequests {
+		counter := newIPCounter()
+		handler = logRequestHandler(fsHandler, counter)
+	}
+
+	srv := &http.Server{
+		Addr:    *addr,
+		Handler: handler,
+	}
 
 	if *tlsCert != "" && *tlsKey != "" {
-		log.Fatal(http.ListenAndServeTLS(*addr, *tlsCert, *tlsKey, nil))
+		fmt.Printf("Serving %s on %s (TLS)\n", *dir, *addr)
+		go func() {
+			if err := srv.ListenAndServeTLS(*tlsCert, *tlsKey); err != nil && err != http.ErrServerClosed {
+				log.Fatal(err)
+			}
+		}()
 	} else {
-		log.Fatal(http.ListenAndServe(*addr, nil))
+		fmt.Printf("Serving %s on %s\n", *dir, *addr)
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Fatal(err)
+			}
+		}()
 	}
-}
+	// Graceful shutdown logic
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
-const exampleJSON = `{
-  "listeners": [
-    { "addr": ":80" },
-    { "addr": ":443", "tls_cert": "./fullchain.pem", "tls_key": "./privkey.pem" }
-  ],
-  "gzip": true,
-  "access_log": "combined",
-  "rate_limit": { "rps": 50, "burst": 100 },
-  "servers": [
-    {
-      "hosts": ["example.com", "www.example.com"],
-      "routes": [
-        { "path_prefix": "/", "static_dir": "./www", "index_file": "index.html" },
-        { "path_prefix": "/api/", "strip_prefix": true, "upstreams": ["http://127.0.0.1:9000", "http://127.0.0.1:9001"], "timeout_seconds": 10, "proxy_headers": {"X-Forwarded-Host": "example.com"} }
-      ]
-    }
-  ]
-}`
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for {
+			fmt.Print(">>> ")
+			if !scanner.Scan() {
+				break
+			}
+			cmd := scanner.Text()
+			if cmd == "exit" || cmd == "stop" {
+				fmt.Println("Shutting down...")
+				_ = srv.Close()
+				os.Exit(0)
+			}
+			if cmd == "reload" {
+				fmt.Println("Reloading Server!")
+				if _, err := os.Stat(*dir); os.IsNotExist(err) {
+					fmt.Printf("Directory %s does not exist\n", *dir)
+					continue
+				}
+				newHandler := http.FileServer(http.Dir(*dir))
+				if *logRequests {
+					counter := newIPCounter()
+					newHandler = logRequestHandler(newHandler, counter)
+				}
+				srv.Handler = newHandler
+			}
+		}
+	}()
+
+	<-stop
+	fmt.Println("Received interrupt, shutting down...")
+	_ = srv.Close()
+	fmt.Println("Server stopped.")
+}
