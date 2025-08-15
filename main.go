@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -396,12 +397,17 @@ func main() {
 		return
 	}
 
-	execPath, err := os.Executable()
-	if err != nil {
-		log.Fatalf("Failed to get executable path: %v", err)
+	var defaultDir string
+	if runtime.GOOS == "windows" {
+		execPath, err := os.Executable()
+		if err != nil {
+			log.Fatalf("Failed to get executable path: %v", err)
+		}
+		execDir := filepath.Dir(execPath)
+		defaultDir = filepath.Join(execDir, "web")
+	} else {
+		defaultDir = "/usr/local/share/goserve/web"
 	}
-	execDir := filepath.Dir(execPath)
-	defaultDir := filepath.Join(execDir, "web")
 
 	os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
 
