@@ -56,26 +56,14 @@ type RateCfg struct {
 	Burst             float64 `json:"burst"`
 }
 
-type atomicHandler struct{ v atomic.Value }
-
-func (a *atomicHandler) Store(h http.Handler) { a.v.Store(h) }
-func (a *atomicHandler) Load() http.Handler   { return a.v.Load().(http.Handler) }
-func (a *atomicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	a.Load().ServeHTTP(w, r)
-}
-
 type proxyPool struct {
-	backends []*urlTarget
+	backends []string
 	idx      uint32
 }
 
-type urlTarget struct {
-	url string
-}
-
-func (p *proxyPool) next() *urlTarget {
+func (p *proxyPool) next() string {
 	if len(p.backends) == 0 {
-		return nil
+		return ""
 	}
 	i := atomic.AddUint32(&p.idx, 1)
 	return p.backends[int(i-1)%len(p.backends)]
@@ -262,25 +250,21 @@ func buildHandler(cfg *Config) http.Handler {
 				}
 			} else if len(rt.Upstreams) > 0 {
 				pool := &proxyPool{}
-				for _, u := range rt.Upstreams {
-					pool.backends = append(pool.backends, &urlTarget{url: u})
-				}
+				pool.backends = append(pool.backends, rt.Upstreams...)
 				h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					t := pool.next()
-					if t == nil {
-						http.Error(w, "No upstream", 502)
+					if t == "" {
+						http.Error(w, "No upstream", http.StatusBadGateway)
 						return
 					}
-					proxyTo(w, r, t.url, rt)
+					proxyTo(w, r, t, rt)
 				})
 			} else {
-				h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+				h = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					http.NotFound(w, r)
+				})
 			}
 			wrap := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !hostMatch(srv.Hosts, r.Host) {
-					http.NotFound(w, r)
-					return
-				}
 				if !pathHasPrefix(pfx, r.URL.Path) {
 					http.NotFound(w, r)
 					return
@@ -386,8 +370,42 @@ func logRequestHandler(next http.Handler, counter *ipCounter) http.Handler {
 	})
 }
 
+func printHelp() {
+	fmt.Println(`goserve - Simple Go HTTP File Server
+
+Usage:
+  goserve start [--dir DIR] [--addr ADDR] [--log] [--tls-cert CERT] [--tls-key KEY]
+
+Options:
+  --dir        Directory to serve HTML from (default: ./web in goserve directory)
+  --addr       Address to listen on (default: :8080)
+  --log        Log GET requests with duration
+  --tls-cert   Path to TLS certificate
+  --tls-key    Path to TLS key
+
+Commands:
+  start        Start the HTTP server
+
+Examples:
+  goserve start --dir ./ --addr :8081 --log`)
+}
+
 func main() {
-	dir := flag.String("dir", "./html", "Directory to serve HTML from")
+	if len(os.Args) < 2 || os.Args[1] != "start" {
+		printHelp()
+		return
+	}
+
+	execPath, err := os.Executable()
+	if err != nil {
+		log.Fatalf("Failed to get executable path: %v", err)
+	}
+	execDir := filepath.Dir(execPath)
+	defaultDir := filepath.Join(execDir, "web")
+
+	os.Args = append([]string{os.Args[0]}, os.Args[2:]...)
+
+	dir := flag.String("dir", defaultDir, "Directory to serve HTML from")
 	addr := flag.String("addr", ":8080", "Address to listen on")
 	logRequests := flag.Bool("log", false, "Log GET requests with duration")
 	tlsCert := flag.String("tls-cert", "", "Path to TLS certificate")
@@ -456,6 +474,10 @@ func main() {
 				fmt.Println("Shutting down...")
 				_ = srv.Shutdown(context.TODO())
 				os.Exit(0)
+			case "help", "-help":
+				printHelp()
+			case "":
+				continue
 			case "reload":
 				fmt.Println("Reloading Server!")
 				if _, err := os.Stat(*dir); os.IsNotExist(err) {
