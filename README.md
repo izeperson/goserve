@@ -11,4 +11,6 @@
   <h2><strong>Setup/Use</strong></h2>
   <p>To use this tool, install it via the releases page for your OS. After doing so, open a terminal and enter "goserve start". This will open a page telling you how to change the default webpage to your own. If you are unsure of launch options, use "goserve". </p>
   <h3><strong>Supported on Windows and Linux. (.rpm)<strong></h3>
+  <br>
+  <p>Future support for Debian is in the making.</p>
 </div>
